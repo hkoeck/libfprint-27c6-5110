@@ -17,6 +17,8 @@ BuildRequires:  pkgconfig(gusb)
 BuildRequires:  pkgconfig(gudev-1.0)
 BuildRequires:  pkgconfig(cairo)
 BuildRequires:  pkgconfig(gnutls)
+BuildRequires:  pkgconfig(openssl)
+BuildRequires:  nss-devel
 BuildRequires:  pixman-devel
 
 # Drop-in replacement for the stock libfprint: provides the same soname so
