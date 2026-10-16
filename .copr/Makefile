@@ -7,8 +7,12 @@ VERSION = 1.94.9
 outdir ?= $(CURDIR)
 
 srpm:
-	git submodule update --init --recursive
-	cd libfprint-fork && git apply -p1 "$(CURDIR)/rpm/0001-psk-from-file.patch"
+	# COPR clones the repo with --recursive on the host, so the submodule is
+	# already populated and `git` is NOT available in the srpm buildroot. Only
+	# fetch submodules when missing (i.e. a plain local clone), and apply the
+	# patch with patch(1), which IS present in the buildroot.
+	test -f libfprint-fork/meson.build || git submodule update --init --recursive
+	patch -p1 -d libfprint-fork < rpm/0001-psk-from-file.patch
 	rm -rf /tmp/$(NAME)-$(VERSION)
 	mkdir -p /tmp/$(NAME)-$(VERSION)
 	tar --exclude=.git --exclude=./build -C libfprint-fork -cf - . \
