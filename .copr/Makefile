@@ -8,7 +8,7 @@ outdir ?= $(CURDIR)
 
 srpm:
 	git submodule update --init --recursive
-	patch -p1 -d libfprint-fork < rpm/0001-psk-from-file.patch
+	cd libfprint-fork && git apply -p1 "$(CURDIR)/rpm/0001-psk-from-file.patch"
 	rm -rf /tmp/$(NAME)-$(VERSION)
 	mkdir -p /tmp/$(NAME)-$(VERSION)
 	tar --exclude=.git --exclude=./build -C libfprint-fork -cf - . \
