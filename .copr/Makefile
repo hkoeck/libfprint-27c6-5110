@@ -13,6 +13,7 @@ srpm:
 	# patch with patch(1), which IS present in the buildroot.
 	test -f libfprint-fork/meson.build || git submodule update --init --recursive
 	patch -p1 -d libfprint-fork < rpm/0001-psk-from-file.patch
+	patch -p1 -d libfprint-fork < rpm/0002-report-on-touch.patch
 	rm -rf /tmp/$(NAME)-$(VERSION)
 	mkdir -p /tmp/$(NAME)-$(VERSION)
 	tar --exclude=.git --exclude=./build -C libfprint-fork -cf - . \

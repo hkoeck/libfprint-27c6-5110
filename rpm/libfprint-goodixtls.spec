@@ -1,6 +1,6 @@
 Name:           libfprint-goodixtls
 Version:        1.94.9
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        libfprint with the Goodix 5110 TLS driver (SIGFM matcher + external PSK)
 
 License:        LGPL-2.1-or-later
@@ -59,5 +59,8 @@ default driver set, so other supported readers keep working too.
 /usr/lib/udev/rules.d/*libfprint*.rules
 
 %changelog
+* Fri Oct 17 2026 hkoeck - 1.94.9-2
+- verify/identify: report the match on touch (skip FDT_UP lift wait).
+
 * Fri Oct 16 2026 hkoeck - 1.94.9-1
 - Switch to the SIGFM-matcher driver (buxel/iHat3Microsoft), external PSK.
