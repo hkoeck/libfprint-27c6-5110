@@ -1,0 +1,89 @@
+diff --git a/libfprint/drivers/goodixtls/goodix.c b/libfprint/drivers/goodixtls/goodix.c
+index 1a61cc9..cc687ef 100644
+--- a/libfprint/drivers/goodixtls/goodix.c
++++ b/libfprint/drivers/goodixtls/goodix.c
+@@ -447,6 +447,38 @@ goodix_receive_timeout_cb(FpDevice *dev, gpointer user_data)
+   goodix_receive_done(dev, NULL, 0, error);
+ }
+ 
++void
++goodix_cancel_read_loop(FpDevice *dev)
++{
++  FpiDeviceGoodixTls *self = FPI_DEVICE_GOODIXTLS(dev);
++  FpiDeviceGoodixTlsPrivate *priv = fpi_device_goodixtls_get_instance_private(self);
++  gboolean cmd_pending = priv->ack || priv->reply;
++
++  if (!priv->inited)
++    return;
++
++  /* The bulk-in pump is submitted with an infinite timeout, so it outlives the
++   * operation that started it. Left running it keeps the USB device busy, and
++   * fprintd waits for the device to go idle before it releases the claim --
++   * which is how an interrupted verify ends up as "Device was already claimed"
++   * for everyone afterwards. */
++  priv->inited = FALSE;
++  g_cancellable_cancel(priv->transfer_cancel_tkn);
++
++  /* A command still waiting for its reply will never get one now: the finger
++   * detect commands are sent without a timeout, so nothing else would ever
++   * fail them. Fail it the way a command timeout does, so the state machine
++   * unwinds and the driver reports the operation as cancelled. */
++  if (cmd_pending)
++    {
++      GError *error = NULL;
++
++      g_set_error(&error, G_IO_ERROR, G_IO_ERROR_CANCELLED, "Command cancelled: 0x%02x",
++                  priv->cmd);
++      goodix_receive_done(dev, NULL, 0, error);
++    }
++}
++
+ void
+ goodix_start_read_loop(FpDevice *dev)
+ {
+diff --git a/libfprint/drivers/goodixtls/goodix.h b/libfprint/drivers/goodixtls/goodix.h
+index c80d162..e701e41 100644
+--- a/libfprint/drivers/goodixtls/goodix.h
++++ b/libfprint/drivers/goodixtls/goodix.h
+@@ -81,6 +81,11 @@ data_to_str(guint8 *data, guint32 length);
+ void
+ goodix_start_read_loop(FpDevice *dev);
+ 
++/* Stops the read loop and fails a command that is waiting for a reply.
++ * Used by the cancel handler; the next activation restarts the loop. */
++void
++goodix_cancel_read_loop(FpDevice *dev);
++
+ /* ---- GOODIX RECEIVE SECTION END ---- */
+ 
+ /* ----------------------------------------------------------------------------- */
+diff --git a/libfprint/drivers/goodixtls/goodix5xx.c b/libfprint/drivers/goodixtls/goodix5xx.c
+index 7b04d05..0a93b0b 100644
+--- a/libfprint/drivers/goodixtls/goodix5xx.c
++++ b/libfprint/drivers/goodixtls/goodix5xx.c
+@@ -1327,6 +1327,17 @@ dev_verify_identify (FpDevice *dev)
+   fpi_ssm_start (priv->task_ssm, verify_ssm_done);
+ }
+ 
++/* ---- Cancellation ---- */
++
++/* Called when the operation is cancelled - fprintd does this when the client
++ * that asked for it goes away, e.g. when the lock screen is unlocked by a
++ * password while the finger scan is still waiting. */
++static void
++dev_cancel (FpDevice *dev)
++{
++  goodix_cancel_read_loop (dev);
++}
++
+ /* ---- GObject class init ---- */
+ 
+ void
+@@ -1346,6 +1357,7 @@ fpi_device_goodixtls5xx_class_init(FpiDeviceGoodixTls5xxClass *self)
+   dev_cls->enroll   = dev_enroll;
+   dev_cls->verify   = dev_verify_identify;
+   dev_cls->identify = dev_verify_identify;
++  dev_cls->cancel   = dev_cancel;
+ }
+ 
+ void
