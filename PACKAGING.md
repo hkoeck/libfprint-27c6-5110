@@ -14,14 +14,52 @@ adds RPM packaging + COPR support and one local patch:
 - `.copr/Makefile` — COPR `make srpm` target: inits the submodule, applies the
   patch, tars a release, builds the SRPM.
 
-## Getting the PSK (per machine, one-time)
+## Do I need the PSK file at all?
 
-The PSK is secret and device-specific — it is **not** shipped in the package.
-Recover it from the Windows install that provisioned the sensor (DPAPI), or let
-Linux provision a fresh one. See `goodix-fp/NOTES.md` in the notebook repo for
-the full procedure, then:
+The sensor speaks TLS-PSK, and which key it expects depends on how it was
+provisioned. Only the second case needs the file:
+
+**The sensor was reflashed by goodix-fp-dump.** That is the community route and
+it writes the all-zeros factory PSK. The driver uses that key by default, so
+the package works as installed and `/etc/goodix-fp/psk.bin` is not needed.
+
+**The sensor is still provisioned by the vendor's Windows driver.** Then the key
+is a random 32 bytes that the Windows driver generated and sealed; the sensor
+accepts nothing else. Reflashing would work but takes the sensor away from
+Windows. Putting the real key in `/etc/goodix-fp/psk.bin` lets both systems use
+the sensor, and Linux never writes to it.
+
+## Getting the PSK from a vendor-provisioned sensor (one-time, per machine)
+
+**You do not need to boot Windows, but the Windows installation that provisioned
+the sensor has to still exist.** The key is sealed with that installation's
+machine DPAPI key. Reinstalled, reset or wiped Windows means the master key is
+gone and the sealed key is unrecoverable — then the only way forward is to
+reflash with goodix-fp-dump (and Windows loses the sensor until its driver
+provisions it again).
+
+Extraction is read-only and offline, from the Windows partition mounted `ro`:
+
+1. Take the sealed blob: `C:\ProgramData\Goodix\Goodix_Cache.bin`, or read
+   slot `0xbb010002` from the sensor. Last 8 bytes are the salt, the rest is a
+   DPAPI blob.
+2. Derive the 48-byte entropy from that salt (Goodix does this with a fixed
+   routine; see `tools/` in the notebook repo for the emulation).
+3. Get the `DPAPI_SYSTEM` LSA secret from the `SYSTEM` + `SECURITY` hives, use it
+   to decrypt the master key the blob names under `Windows\System32\Microsoft\
+   Protect\S-1-5-18\`. impacket covers this.
+4. Unseal the blob with that key and the entropy → the 32-byte PSK.
+5. Verify before trusting it: `SHA256(SecWhiteEncrypt(PSK))` must equal the hash
+   in sensor slot `0xbb020003`. If it does not match, the key belongs to an
+   older Windows install.
+
+Then:
 
     sudo install -Dm600 psk.bin /etc/goodix-fp/psk.bin
+    sudo systemctl restart fprintd
+
+A wrong or truncated file is not fatal: the driver warns and falls back to the
+factory PSK.
 
 ## Build locally
 
