@@ -1,0 +1,90 @@
+Upstream fix for the fprintd hang on a cancelled operation, taken from
+buxel/libfprint#3 by dant4ick (driver part only; the PR's regression tests are
+not carried here because the RPM builds with -Dinstalled-tests=false).
+
+Verified on this machine: lock, let the fingerprint verify start, unlock by PIN,
+claim the device again - three cycles, claimable every time, and fprintd stops
+in 0.09s instead of timing out into a SIGABRT.
+
+diff --git a/libfprint/drivers/goodixtls/goodix.c b/libfprint/drivers/goodixtls/goodix.c
+index 1a61cc9..b841021 100644
+--- a/libfprint/drivers/goodixtls/goodix.c
++++ b/libfprint/drivers/goodixtls/goodix.c
+@@ -89,6 +89,20 @@ goodix_receive_done(FpDevice *dev, guint8 *data, guint16 length, GError *error)
+     callback(dev, data, length, user_data, error);
+ }
+ 
++void
++goodix_cancel_pending_command(FpDevice *dev)
++{
++  FpiDeviceGoodixTlsPrivate *priv = fpi_device_goodixtls_get_instance_private(
++      FPI_DEVICE_GOODIXTLS(dev));
++
++  /* Complete the innermost command callback, letting nested SSMs unwind.
++   * A SIGFM worker, when active instead, owns the device cancellable. */
++  if (priv->ack || priv->reply)
++    goodix_receive_done(dev, NULL, 0,
++                        g_error_new_literal(G_IO_ERROR, G_IO_ERROR_CANCELLED,
++                                            "Fingerprint operation cancelled"));
++}
++
+ static void
+ goodix_receive_none(FpDevice *dev, guint8 *data, guint16 length, gpointer user_data,
+                     GError *error)
+@@ -1002,7 +1016,16 @@ tls_handshake_done(FpiSsm *ssm, FpDevice *dev, GError *error)
+   if (error)
+     {
+       fp_err("TLS handshake failed: %s (code: %d)", error->message, error->code);
+-      g_error_free(error);
++      FpiDeviceGoodixTls *self = FPI_DEVICE_GOODIXTLS(dev);
++      FpiDeviceGoodixTlsPrivate *priv = fpi_device_goodixtls_get_instance_private(self);
++      GoodixCallbackInfo *callback = g_steal_pointer(&priv->tls_ready_callback);
++      if (callback)
++        {
++          ((GoodixNoneCallback)callback->callback)(dev, callback->user_data, error);
++          g_free(callback);
++        }
++      else
++        g_error_free(error);
+       return;
+     }
+   goodix_send_tls_successfully_established(dev, on_tls_successfully_established, NULL);
+diff --git a/libfprint/drivers/goodixtls/goodix.h b/libfprint/drivers/goodixtls/goodix.h
+index c80d162..b732c9c 100644
+--- a/libfprint/drivers/goodixtls/goodix.h
++++ b/libfprint/drivers/goodixtls/goodix.h
+@@ -201,6 +201,9 @@ goodix_dev_deinit(FpDevice *dev, GError **error);
+ void
+ goodix_reset_state(FpDevice *dev);
+ 
++void
++goodix_cancel_pending_command(FpDevice *dev);
++
+ /* ---- DEV SECTION END ---- */
+ 
+ /* ----------------------------------------------------------------------------- */
+diff --git a/libfprint/drivers/goodixtls/goodix5xx.c b/libfprint/drivers/goodixtls/goodix5xx.c
+index 7b04d05..9d68ee7 100644
+--- a/libfprint/drivers/goodixtls/goodix5xx.c
++++ b/libfprint/drivers/goodixtls/goodix5xx.c
+@@ -1327,6 +1327,12 @@ dev_verify_identify (FpDevice *dev)
+   fpi_ssm_start (priv->task_ssm, verify_ssm_done);
+ }
+ 
++static void
++dev_cancel (FpDevice *dev)
++{
++  goodix_cancel_pending_command (dev);
++}
++
+ /* ---- GObject class init ---- */
+ 
+ void
+@@ -1346,6 +1352,7 @@ fpi_device_goodixtls5xx_class_init(FpiDeviceGoodixTls5xxClass *self)
+   dev_cls->enroll   = dev_enroll;
+   dev_cls->verify   = dev_verify_identify;
+   dev_cls->identify = dev_verify_identify;
++  dev_cls->cancel   = dev_cancel;
+ }
+ 
+ void

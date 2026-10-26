@@ -14,7 +14,7 @@ srpm:
 	test -f libfprint-fork/meson.build || git submodule update --init --recursive
 	patch -p1 -d libfprint-fork < rpm/0001-psk-from-file.patch
 	patch -p1 -d libfprint-fork < rpm/0002-report-on-touch.patch
-	patch -p1 -d libfprint-fork < rpm/0003-cancel-read-loop-on-abort.patch
+	patch -p1 -d libfprint-fork < rpm/0003-upstream-cancel-pending-command.patch
 	rm -rf /tmp/$(NAME)-$(VERSION)
 	mkdir -p /tmp/$(NAME)-$(VERSION)
 	tar --exclude=.git --exclude=./build -C libfprint-fork -cf - . \
