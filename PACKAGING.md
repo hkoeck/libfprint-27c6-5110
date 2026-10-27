@@ -38,7 +38,15 @@ gone and the sealed key is unrecoverable — then the only way forward is to
 reflash with goodix-fp-dump (and Windows loses the sensor until its driver
 provisions it again).
 
-Extraction is read-only and offline, from the Windows partition mounted `ro`:
+`tools/scripts/recover-psk.py` does all of this; point it at the mounted
+Windows partition (needs `pip install impacket`):
+
+    python3 tools/scripts/recover-psk.py --windows-mount /run/media/you/WINDOWS -o psk.bin
+    sudo install -Dm600 psk.bin /etc/goodix-fp/psk.bin
+    sudo systemctl restart fprintd
+
+It reads only, never writes to the sensor or to Windows, and was verified
+byte-for-byte against a sensor running in both OSes. What it does, step by step:
 
 1. Take the sealed blob: `C:\ProgramData\Goodix\Goodix_Cache.bin`, or read
    slot `0xbb010002` from the sensor. Last 8 bytes are the salt, the rest is a
