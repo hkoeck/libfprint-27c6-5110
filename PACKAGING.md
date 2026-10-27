@@ -43,15 +43,18 @@ Extraction is read-only and offline, from the Windows partition mounted `ro`:
 1. Take the sealed blob: `C:\ProgramData\Goodix\Goodix_Cache.bin`, or read
    slot `0xbb010002` from the sensor. Last 8 bytes are the salt, the rest is a
    DPAPI blob.
-2. Derive the 48-byte entropy from that salt (Goodix does this with a fixed
-   routine; see `tools/` in the notebook repo for the emulation).
+2. Derive the 48-byte entropy from that salt (a fixed Goodix routine):
+   `rk = 04e0b0f3f5598417dde298e467c795f7`, `h1 = SHA256(salt)`,
+   `entropy = h1[16:] + SHA256(h1[:16] + rk)`. `rk` is a constant baked into
+   gfspi.dll 1.1.124.115.
 3. Get the `DPAPI_SYSTEM` LSA secret from the `SYSTEM` + `SECURITY` hives, use it
    to decrypt the master key the blob names under `Windows\System32\Microsoft\
    Protect\S-1-5-18\`. impacket covers this.
 4. Unseal the blob with that key and the entropy → the 32-byte PSK.
 5. Verify before trusting it: `SHA256(SecWhiteEncrypt(PSK))` must equal the hash
    in sensor slot `0xbb020003`. If it does not match, the key belongs to an
-   older Windows install.
+   older Windows install. (`SecWhiteEncrypt` is the Goodix whitebox transform;
+   a bit-exact implementation of it is still TODO in this repo.)
 
 Then:
 
