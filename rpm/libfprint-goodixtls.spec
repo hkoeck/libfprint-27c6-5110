@@ -1,6 +1,6 @@
 Name:           libfprint-goodixtls
 Version:        1.94.9
-Release:        4%{?dist}
+Release:        5%{?dist}
 Summary:        libfprint with the Goodix 5110 TLS driver (SIGFM matcher + external PSK)
 
 License:        LGPL-2.1-or-later
@@ -59,6 +59,11 @@ default driver set, so other supported readers keep working too.
 /usr/lib/udev/rules.d/*libfprint*.rules
 
 %changelog
+* Wed Oct 28 2026 hkoeck - 1.94.9-5
+- goodixtls: forward a cancellation from the TLS-established command instead of
+  dropping it, so a cancel in its 10 ms window cannot leave the init SSM
+  waiting for a finger (buxel/libfprint#3 review by fistboom).
+
 * Mon Oct 26 2026 hkoeck - 1.94.9-4
 - goodixtls: replace the local cancel handler with the upstream one from
   buxel/libfprint#3, which fixes the same hang and also propagates TLS

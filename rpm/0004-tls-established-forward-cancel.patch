@@ -1,0 +1,44 @@
+Follow-up to 0003, from fistboom's review on buxel/libfprint#3.
+
+on_tls_successfully_established() passed NULL to the ready callback instead of
+its own error. That is deliberate for the command's 10 ms timeout - the sensor
+acknowledges the TLS-established command inside TLS but never sends a protocol
+reply - but a cancellation arrives through the same path, so a cancel landing in
+that window was swallowed: the init SSM saw success, went on to FDT_DOWN and
+waited for a finger again, with nothing left to cancel it. The hang 0003 fixes,
+in a narrow window. Dropping the error also leaked it, since goodix_receive_done
+hands ownership to the callback.
+
+Forward a cancellation, clear anything else.
+
+Verified here: with the PR's test suite plus fistboom's two cases on top of
+8c36740, /goodixtls/tls/established/cancel fails before this patch
+("result.error is NULL") and all six cases pass with it.
+diff --git a/libfprint/drivers/goodixtls/goodix.c b/libfprint/drivers/goodixtls/goodix.c
+index b841021..b22d6e5 100644
+--- a/libfprint/drivers/goodixtls/goodix.c
++++ b/libfprint/drivers/goodixtls/goodix.c
+@@ -1006,9 +1006,20 @@ on_tls_successfully_established(FpDevice *dev, gpointer user_data, GError *error
+   fp_dbg("HANDSHAKE DONE");
+   FpiDeviceGoodixTls *self = FPI_DEVICE_GOODIXTLS(dev);
+   FpiDeviceGoodixTlsPrivate *priv = fpi_device_goodixtls_get_instance_private(self);
+-  ((GoodixNoneCallback)priv->tls_ready_callback->callback)(
+-      dev, priv->tls_ready_callback->user_data, NULL);
+-  g_clear_pointer(&priv->tls_ready_callback, g_free);
++  GoodixCallbackInfo *callback = g_steal_pointer(&priv->tls_ready_callback);
++
++  /* This command normally ends in its 10 ms timeout, so only a cancellation
++   * is a real error here; dropping it would send the SSM on to FDT_DOWN. */
++  if (error && !g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
++    g_clear_error(&error);
++
++  if (callback)
++    {
++      ((GoodixNoneCallback)callback->callback)(dev, callback->user_data, error);
++      g_free(callback);
++    }
++  else
++    g_clear_error(&error);
+ }
+ static void
+ tls_handshake_done(FpiSsm *ssm, FpDevice *dev, GError *error)

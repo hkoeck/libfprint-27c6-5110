@@ -15,6 +15,7 @@ srpm:
 	patch -p1 -d libfprint-fork < rpm/0001-psk-from-file.patch
 	patch -p1 -d libfprint-fork < rpm/0002-report-on-touch.patch
 	patch -p1 -d libfprint-fork < rpm/0003-upstream-cancel-pending-command.patch
+	patch -p1 -d libfprint-fork < rpm/0004-tls-established-forward-cancel.patch
 	rm -rf /tmp/$(NAME)-$(VERSION)
 	mkdir -p /tmp/$(NAME)-$(VERSION)
 	tar --exclude=.git --exclude=./build -C libfprint-fork -cf - . \
