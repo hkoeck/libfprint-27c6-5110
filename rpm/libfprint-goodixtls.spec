@@ -1,6 +1,6 @@
 Name:           libfprint-goodixtls
 Version:        1.94.9
-Release:        5%{?dist}
+Release:        6%{?dist}
 Summary:        libfprint with the Goodix 5110 TLS driver (SIGFM matcher + external PSK)
 
 License:        LGPL-2.1-or-later
@@ -59,6 +59,20 @@ default driver set, so other supported readers keep working too.
 /usr/lib/udev/rules.d/*libfprint*.rules
 
 %changelog
+* Tue Nov 10 2026 hkoeck - 1.94.9-6
+- sigfm: keep the strongest keypoints instead of the topmost ones and raise the
+  cap to 256, so the half-resolution pyramid level is no longer cut off by an
+  arbitrary scan line.
+- goodix5xx: CLAHE between the percentile squash and the unsharp mask. Measured
+  on 27c6:5110 with the same enrolment procedure, match scores went from
+  16/7/13 to 28/11/13 inliers against a 7-inlier threshold - the margin grows,
+  the hit zone does not.
+- goodix5xx: adaptive template study. A probe confirmed by an enrolled sample
+  with a clear margin is appended to a 0600 sidecar beside the print and
+  considered after the enrolled samples; at most 16 are kept, oldest out, tied
+  to the enrolment by a sha256 digest so re-enrolling discards them. An unlock
+  where every enrolled sample failed (best 4/7) was carried by a learned sample
+  at 21/7.
 * Wed Oct 28 2026 hkoeck - 1.94.9-5
 - goodixtls: forward a cancellation from the TLS-established command instead of
   dropping it, so a cancel in its 10 ms window cannot leave the init SSM

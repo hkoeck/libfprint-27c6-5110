@@ -1,0 +1,448 @@
+goodix5xx: CLAHE in the image pipeline, and study confirmed presses
+
+Two changes to how well this sensor recognises a finger, both measured on a
+27c6:5110 with the same spread enrolment procedure each time.
+
+1. CLAHE between the percentile squash and the unsharp mask.
+
+The global percentile stretch fixes the overall black and white level but
+leaves local contrast as the sensor delivered it, and a press sensor delivers
+it unevenly: the centre of the contact area is well modulated while the
+edges, touched with less pressure, stay washed out. Those edges are what a
+displaced press has to share with the template, and FAST finds no corners in
+them. 4x4 tiles over the frame with a clip limit, interpolated between
+neighbouring tile mappings so no seams appear.
+
+It does not widen the hit zone - a press that lands outside the enrolled area
+still has nothing to match - it widens the margin. Match scores went from
+16, 7, 13 to 28, 11, 13 against a 7-inlier accept threshold, i.e. the weakest
+accepted press moved off the threshold. Keypoints per frame 128 -> 139-144,
+extraction 1.7-2.6 ms.
+
+2. Adaptive template study.
+
+The enrolment samples are all the coverage a template will ever have:
+libfprint has no way for a driver to amend a print after a verify, so a press
+outside the enrolled area keeps failing forever however often the finger is
+accepted elsewhere. Confirmed probes are appended to a sidecar file beside
+the print, and matching considers them after the enrolled samples.
+
+Three properties keep this from drifting into a skeleton key: only a probe
+that matched an *enrolled* sample is learned, never one that only matched
+another learned sample, so every stored sample is one hop from the enrolment;
+the score has to clear the accept threshold by 3, not merely pass; and at
+most 16 samples are kept, oldest out, with the file tied to the enrolment by
+a sha256 digest so that re-enrolling discards everything learned about the
+old template. The file is 0600 root and written atomically.
+
+Measured in real use after five learned samples: an unlock where every
+enrolled sample failed (best 4 of 7 inliers) was carried by a learned sample
+at 21 - a finger position the enrolment never covered. A later press at 9
+matched but was correctly not learned.
+
+Rejected on measurement while developing these, for the record: lowering
+FAST_THRESHOLD from 10 to 7 raises the keypoint count but lowers accuracy
+(the extra corners are weak and poorly distinctive, pairing wrongly), and
+ORB-style steered BRIEF makes it worse still (the intensity-centroid
+orientation is too noisy on low-contrast ridge patches, costing more in
+descriptor repeatability than rotation invariance gains).
+
+diff --git a/libfprint/drivers/goodixtls/goodix5xx.c b/libfprint/drivers/goodixtls/goodix5xx.c
+index 7b04d05..198e874 100644
+--- a/libfprint/drivers/goodixtls/goodix5xx.c
++++ b/libfprint/drivers/goodixtls/goodix5xx.c
+@@ -25,8 +25,10 @@
+ #include "drivers/goodixtls/goodix5xx.h"
+ #include "sigfm.h"
+ 
++#include <glib/gstdio.h>
+ #include <math.h>
+ #include <stdio.h>
++#include <string.h>
+ 
+ typedef struct
+ {
+@@ -380,6 +382,141 @@ goodixtls5xx_squash_frame_percentile(GoodixTls5xxPix *frame, guint8 *squashed,
+     }
+ }
+ 
++/* -------------------------------------------------------------------------
++ * goodixtls5xx_clahe_inplace:
++ *
++ * Contrast Limited Adaptive Histogram Equalisation on the squashed 8-bit
++ * frame.  The global percentile stretch above fixes the overall black and
++ * white level but leaves local contrast as the sensor delivered it, and a
++ * press sensor delivers it unevenly: the centre of the contact area is
++ * well modulated while the edges, where the finger touches with less
++ * pressure, stay washed out.  Those edges are exactly the region a probe
++ * press needs to share with the template, and FAST finds no corners in
++ * them.  CLAHE equalises each tile against its own histogram, with the
++ * per-bin clip limit keeping flat tiles from amplifying noise, and
++ * interpolates between neighbouring tile mappings so no tile seams appear.
++ *
++ * Tiles are deliberately large for an image this small (4x4 over 88x80 =
++ * 440 px per tile), so each histogram still has enough samples to mean
++ * something.
++ * ---------------------------------------------------------------------- */
++
++#define CLAHE_TILES_X 4
++#define CLAHE_TILES_Y 4
++#define CLAHE_CLIP_FACTOR 2.5f
++
++static void
++goodixtls5xx_clahe_inplace(guint8 *img, int width, int height)
++{
++  const int tw = (width + CLAHE_TILES_X - 1) / CLAHE_TILES_X;
++  const int th = (height + CLAHE_TILES_Y - 1) / CLAHE_TILES_Y;
++  guint8 lut[CLAHE_TILES_Y][CLAHE_TILES_X][256];
++
++  /* Per-tile clipped-histogram equalisation mapping */
++  for (int ty = 0; ty < CLAHE_TILES_Y; ty++)
++    {
++      for (int tx = 0; tx < CLAHE_TILES_X; tx++)
++        {
++          guint32 hist[256] = { 0 };
++          const int x0 = tx * tw, x1 = MIN (x0 + tw, width);
++          const int y0 = ty * th, y1 = MIN (y0 + th, height);
++          const int npix = (x1 - x0) * (y1 - y0);
++
++          if (npix <= 0)
++            {
++              for (int v = 0; v < 256; v++)
++                lut[ty][tx][v] = (guint8) v;
++              continue;
++            }
++
++          for (int y = y0; y < y1; y++)
++            for (int x = x0; x < x1; x++)
++              hist[img[y * width + x]]++;
++
++          /* Clip and redistribute the excess uniformly */
++          guint32 limit = (guint32) (CLAHE_CLIP_FACTOR * (float) npix / 256.0f);
++          if (limit < 1)
++            limit = 1;
++
++          guint32 excess = 0;
++          for (int v = 0; v < 256; v++)
++            if (hist[v] > limit)
++              {
++                excess += hist[v] - limit;
++                hist[v] = limit;
++              }
++          const guint32 give = excess / 256;
++          guint32 rest = excess - give * 256;
++          for (int v = 0; v < 256; v++)
++            {
++              hist[v] += give;
++              if (rest > 0)
++                {
++                  hist[v]++;
++                  rest--;
++                }
++            }
++
++          guint32 cdf = 0;
++          for (int v = 0; v < 256; v++)
++            {
++              cdf += hist[v];
++              lut[ty][tx][v] = (guint8) ((cdf * 255u) / (guint32) npix);
++            }
++        }
++    }
++
++  /* Bilinear interpolation between the four surrounding tile centres */
++  for (int y = 0; y < height; y++)
++    {
++      float fy = ((float) y + 0.5f) / (float) th - 0.5f;
++      int ty0 = (int) floorf (fy);
++      float wy = fy - (float) ty0;
++      int ty1 = ty0 + 1;
++
++      if (ty0 < 0)
++        {
++          ty0 = ty1 = 0;
++          wy = 0.0f;
++        }
++      else if (ty1 > CLAHE_TILES_Y - 1)
++        {
++          ty0 = ty1 = CLAHE_TILES_Y - 1;
++          wy = 0.0f;
++        }
++
++      for (int x = 0; x < width; x++)
++        {
++          float fx = ((float) x + 0.5f) / (float) tw - 0.5f;
++          int tx0 = (int) floorf (fx);
++          float wx = fx - (float) tx0;
++          int tx1 = tx0 + 1;
++
++          if (tx0 < 0)
++            {
++              tx0 = tx1 = 0;
++              wx = 0.0f;
++            }
++          else if (tx1 > CLAHE_TILES_X - 1)
++            {
++              tx0 = tx1 = CLAHE_TILES_X - 1;
++              wx = 0.0f;
++            }
++
++          const guint8 v = img[y * width + x];
++          const float a = (float) lut[ty0][tx0][v];
++          const float b = (float) lut[ty0][tx1][v];
++          const float c = (float) lut[ty1][tx0][v];
++          const float d = (float) lut[ty1][tx1][v];
++          const float top = a + wx * (b - a);
++          const float bot = c + wx * (d - c);
++          const float out = top + wy * (bot - top);
++
++          img[y * width + x] = (guint8) (out < 0.0f ? 0.0f : (out > 255.0f ? 255.0f : out));
++        }
++    }
++}
++
+ /* -------------------------------------------------------------------------
+  * goodixtls5xx_unsharp_mask_inplace:
+  *
+@@ -523,6 +660,7 @@ scan_on_read_img(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError
+   goodixtls5xx_squash_frame_percentile(raw_frame, squashed,
+                                        cls->scan_height * cls->scan_width);
+   g_free(raw_frame);
++  goodixtls5xx_clahe_inplace(squashed, cls->scan_width, cls->scan_height);
+   goodixtls5xx_unsharp_mask_inplace(squashed, cls->scan_width, cls->scan_height);
+   FpImage *img = cls->process_frame(squashed);
+   g_free(squashed);
+@@ -889,6 +1027,167 @@ goodix_sigfm_build_print (FpDevice    *dev,
+   return TRUE;
+ }
+ 
++/* -------------------------------------------------------------------------
++ * Adaptive template study
++ *
++ * The 21 enrolment samples are all the coverage this template will ever
++ * have: libfprint has no way for a driver to amend a print after a verify,
++ * so a press that lands outside the enrolled area keeps failing forever,
++ * however often it is accepted elsewhere. Vendor engines avoid that by
++ * folding confirmed scans back into the template, and the measured effect
++ * on this sensor family is large.
++ *
++ * Confirmed probes are therefore appended to a sidecar file next to the
++ * print, and matching considers them after the enrolled samples. Three
++ * properties keep this from drifting into a skeleton key:
++ *
++ *   - only a probe that matched an *enrolled* sample is learned, never one
++ *     that only matched another learned sample, so every stored sample is
++ *     one hop from the enrolment,
++ *   - the score has to clear GOODIX_LEARN_MIN_SCORE, well above the accept
++ *     threshold, not merely pass,
++ *   - at most GOODIX_LEARN_MAX_SAMPLES are kept, oldest evicted first, and
++ *     the file is tied to the enrolment by a digest so that re-enrolling
++ *     discards everything learned about the old template.
++ * ---------------------------------------------------------------------- */
++
++#define GOODIX_LEARN_MAGIC          "GXL1"
++#define GOODIX_LEARN_VERSION        1
++#define GOODIX_LEARN_MIN_SCORE      (GOODIX_SIGFM_THRESHOLD + 3)
++#define GOODIX_LEARN_MAX_SAMPLES    16
++#define GOODIX_LEARN_STORAGE_ROOT   "/var/lib/fprint"
++#define GOODIX_LEARN_TAG_LEN        64 /* sha256, hex */
++
++static gchar *
++goodix_learn_path (FpDevice *dev, FpPrint *print)
++{
++  const gchar *user = fp_print_get_username (print);
++  const gchar *driver = fp_device_get_driver (dev);
++  const gchar *devid = fp_device_get_device_id (dev);
++
++  if (!user || !*user || !driver || !devid)
++    return NULL;
++
++  /* Refuse anything that could climb out of the storage root. */
++  if (strchr (user, '/') || strchr (devid, '/'))
++    return NULL;
++
++  return g_strdup_printf ("%s/%s/%s/%s/%d.learned", GOODIX_LEARN_STORAGE_ROOT,
++                          user, driver, devid, (int) fp_print_get_finger (print));
++}
++
++/* Digest of the enrolment, so learned data cannot outlive its template. */
++static gchar *
++goodix_learn_tag (GVariant *enrolled_data)
++{
++  g_autoptr(GBytes) bytes = g_variant_get_data_as_bytes (enrolled_data);
++  gsize len = 0;
++  const guchar *data = g_bytes_get_data (bytes, &len);
++
++  return g_compute_checksum_for_data (G_CHECKSUM_SHA256, data, len);
++}
++
++static GPtrArray *
++goodix_learn_load (const gchar *path, const gchar *tag)
++{
++  g_autofree gchar *buf = NULL;
++  gsize len = 0;
++  GPtrArray *out;
++  gsize off;
++  guint32 count;
++
++  if (!path || !g_file_get_contents (path, &buf, &len, NULL))
++    return NULL;
++
++  if (len < 4 + 1 + GOODIX_LEARN_TAG_LEN + 4)
++    return NULL;
++  if (memcmp (buf, GOODIX_LEARN_MAGIC, 4) != 0 || (guint8) buf[4] != GOODIX_LEARN_VERSION)
++    return NULL;
++  if (memcmp (buf + 5, tag, GOODIX_LEARN_TAG_LEN) != 0)
++    {
++      fp_dbg ("learned samples belong to a different enrolment, ignoring");
++      return NULL;
++    }
++
++  off = 5 + GOODIX_LEARN_TAG_LEN;
++  memcpy (&count, buf + off, 4);
++  count = GUINT32_FROM_LE (count);
++  off += 4;
++
++  if (count > GOODIX_LEARN_MAX_SAMPLES)
++    return NULL;
++
++  out = g_ptr_array_new_with_free_func ((GDestroyNotify) g_bytes_unref);
++  for (guint32 i = 0; i < count; i++)
++    {
++      guint32 blen;
++
++      if (off + 4 > len)
++        break;
++      memcpy (&blen, buf + off, 4);
++      blen = GUINT32_FROM_LE (blen);
++      off += 4;
++      if (blen == 0 || off + blen > len)
++        break;
++      g_ptr_array_add (out, g_bytes_new (buf + off, blen));
++      off += blen;
++    }
++
++  return out;
++}
++
++static void
++goodix_learn_append (const gchar *path, const gchar *tag, GPtrArray *existing,
++                     const guchar *blob, gsize blob_len)
++{
++  g_autoptr(GByteArray) file = g_byte_array_new ();
++  g_autofree gchar *dir = g_path_get_dirname (path);
++  guint first;
++  guint32 count32, len32;
++  guint kept;
++
++  if (!g_file_test (dir, G_FILE_TEST_IS_DIR))
++    return; /* print storage not where we expect it - stay out of the way */
++
++  /* Oldest first out once the ring is full; the new sample always fits. */
++  first = 0;
++  if (existing && existing->len + 1 > GOODIX_LEARN_MAX_SAMPLES)
++    first = existing->len + 1 - GOODIX_LEARN_MAX_SAMPLES;
++  kept = (existing ? existing->len : 0) - first;
++
++  g_byte_array_append (file, (const guint8 *) GOODIX_LEARN_MAGIC, 4);
++  g_byte_array_append (file, (const guint8 *) &(guint8) { GOODIX_LEARN_VERSION }, 1);
++  g_byte_array_append (file, (const guint8 *) tag, GOODIX_LEARN_TAG_LEN);
++
++  count32 = GUINT32_TO_LE (kept + 1);
++  g_byte_array_append (file, (const guint8 *) &count32, 4);
++
++  for (guint i = first; existing && i < existing->len; i++)
++    {
++      gsize elen = 0;
++      const guint8 *edata = g_bytes_get_data (g_ptr_array_index (existing, i), &elen);
++
++      len32 = GUINT32_TO_LE ((guint32) elen);
++      g_byte_array_append (file, (const guint8 *) &len32, 4);
++      g_byte_array_append (file, edata, elen);
++    }
++
++  len32 = GUINT32_TO_LE ((guint32) blob_len);
++  g_byte_array_append (file, (const guint8 *) &len32, 4);
++  g_byte_array_append (file, blob, blob_len);
++
++  /* g_file_set_contents writes a temporary file and renames it. */
++  if (!g_file_set_contents (path, (const gchar *) file->data, file->len, NULL))
++    {
++      fp_warn ("could not store learned sample at %s", path);
++      return;
++    }
++  if (g_chmod (path, 0600) != 0)
++    fp_warn ("could not restrict permissions on %s", path);
++
++  fp_dbg ("learned a new sample, %u stored", kept + 1);
++}
++
+ static FpiMatchResult
+ goodix_sigfm_compare (FpDevice   *dev,
+                       FpPrint    *enrolled,
+@@ -903,6 +1202,10 @@ goodix_sigfm_compare (FpDevice   *dev,
+   const guchar *probe_blob;
+   SigfmImgInfo *probe_info;
+   FpiMatchResult result = FPI_MATCH_FAIL;
++  gint enrolled_score = -1;
++  gchar *learn_path = NULL;
++  gchar *learn_tag = NULL;
++  GPtrArray *learned = NULL;
+ 
+   g_object_get (enrolled, "fpi-data", &enrolled_data, NULL);
+   g_object_get (probe, "fpi-data", &probe_data, NULL);
+@@ -971,6 +1274,7 @@ goodix_sigfm_compare (FpDevice   *dev,
+         if (score >= GOODIX_SIGFM_THRESHOLD)
+           {
+             result = FPI_MATCH_SUCCESS;
++            enrolled_score = score;
+             g_variant_unref (entry);
+             break;
+           }
+@@ -978,6 +1282,46 @@ goodix_sigfm_compare (FpDevice   *dev,
+       }
+   }
+ 
++  /* Samples learned from earlier confirmed presses, tried after the
++   * enrolment and never used as a source for further learning. */
++  learn_path = goodix_learn_path (dev, enrolled);
++  learn_tag = goodix_learn_tag (enrolled_data);
++  learned = goodix_learn_load (learn_path, learn_tag);
++
++  if (result != FPI_MATCH_SUCCESS && learned)
++    {
++      for (guint i = 0; i < learned->len; i++)
++        {
++          gsize llen = 0;
++          const guint8 *lblob = g_bytes_get_data (g_ptr_array_index (learned, i), &llen);
++          SigfmImgInfo *linfo = sigfm_deserialize_binary (lblob, llen);
++          gint score;
++
++          if (!linfo)
++            continue;
++
++          score = sigfm_match_score (linfo, probe_info);
++          sigfm_free_info (linfo);
++          fp_dbg ("sigfm score %d/%d (learned %u)", score, GOODIX_SIGFM_THRESHOLD, i);
++
++          if (score >= GOODIX_SIGFM_THRESHOLD)
++            {
++              result = FPI_MATCH_SUCCESS;
++              break;
++            }
++        }
++    }
++
++  /* Study: only a probe confirmed by the enrolment itself, and only with a
++   * clear margin, is folded in. */
++  if (result == FPI_MATCH_SUCCESS && enrolled_score >= GOODIX_LEARN_MIN_SCORE &&
++      fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_VERIFY && learn_path)
++    goodix_learn_append (learn_path, learn_tag, learned, probe_blob, probe_len);
++
++  g_clear_pointer (&learned, g_ptr_array_unref);
++  g_free (learn_path);
++  g_free (learn_tag);
++
+   sigfm_free_info (probe_info);
+   return result;
+ }
