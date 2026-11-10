@@ -1,6 +1,6 @@
 Name:           libfprint-goodixtls
 Version:        1.94.9
-Release:        6%{?dist}
+Release:        7%{?dist}
 Summary:        libfprint with the Goodix 5110 TLS driver (SIGFM matcher + external PSK)
 
 License:        LGPL-2.1-or-later
@@ -59,6 +59,14 @@ default driver set, so other supported readers keep working too.
 /usr/lib/udev/rules.d/*libfprint*.rules
 
 %changelog
+* Tue Nov 10 2026 hkoeck - 1.94.9-7
+- Track iHat3Microsoft/libfprint (goodixtls-upstream-mr) instead of
+  buxel/libfprint: the PSK-from-file, report-on-touch and both cancellation
+  patches this package carried are upstream there now, so patches 0001-0004
+  are dropped. Only the two local matcher patches remain.
+- Picks up three fixes from that base: a 0xd4 wake before enable_chip, no more
+  read-loop resubmit spin on USB errors, and a hardening backport, plus the
+  new goodixtls unit test.
 * Tue Nov 10 2026 hkoeck - 1.94.9-6
 - sigfm: keep the strongest keypoints instead of the topmost ones and raise the
   cap to 256, so the half-resolution pyramid level is no longer cut off by an
